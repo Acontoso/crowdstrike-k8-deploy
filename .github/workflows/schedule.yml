@@ -1,9 +1,9 @@
 name: Pull and Push Latest Falcon Sensor
 
-on:
-  schedule:
-    - cron: '0 0 * * 1'
-  workflow_dispatch:
+# on:
+#   schedule:
+#     - cron: '0 0 * * 1'
+#   workflow_dispatch:
 
 env:
   AWS_REGION: "ap-southeast-2"
