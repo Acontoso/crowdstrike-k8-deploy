@@ -1,0 +1,9 @@
+container:
+  enabled: true
+  sensorResources:
+    limits:
+      cpu: 100m
+      memory: 128Mi
+    requests:
+      cpu: 10m
+      memory: 20Mi

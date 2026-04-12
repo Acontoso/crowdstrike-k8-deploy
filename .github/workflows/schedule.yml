@@ -1,0 +1,167 @@
+name: Pull and Push Latest Falcon Sensor
+
+on:
+  schedule:
+    - cron: '0 0 * * 1'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: "ap-southeast-2"
+
+# Only allow one instance of this workflow to run at a time, to avoid multiple pushes if the schedule triggers while a previous run is still in progress. However, allow the workflow to be manually triggered even if a scheduled run is in progress, since manual runs are typically for urgent fixes and we don't want to block them.
+concurrency:
+  group: plan-push-falcon-sensor
+  cancel-in-progress: true
+
+jobs:
+  pull-push-falcon-sensor:
+    runs-on: ubuntu-latest
+    outputs:
+      image_sha: ${{ steps.resolve_digest.outputs.image_sha }}
+      image_uri: ${{ steps.resolve_digest.outputs.image_uri }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsTerraformRoleArtefact
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+  
+      - name: Pull Latest Falcon Sensor
+        id: pull_sensor
+        env:
+          FALCON_CLIENT_ID: ${{ secrets.FALCON_CLIENT_ID }}
+          FALCON_CLIENT_SECRET: ${{ secrets.FALCON_CLIENT_SECRET }}
+          FALCON_REGION: ${{ secrets.FALCON_REGION }}
+        run: |
+          set -euo pipefail
+
+          git clone https://github.com/CrowdStrike/falcon-scripts.git
+          cd falcon-scripts/bash/containers/falcon-container-sensor-pull
+          chmod +x falcon-container-sensor-pull.sh
+          ./falcon-container-sensor-pull.sh \
+            --client-id "$FALCON_CLIENT_ID" \
+            --client-secret "$FALCON_CLIENT_SECRET" \
+            --region "$FALCON_REGION" \
+            --type falcon-container \
+            --platform x86_64
+
+          # CI runner is ephemeral; pick the one pulled non-latest sensor tag.
+          sensor_tag="$(docker images registry.crowdstrike.com/falcon-container/release/falcon-container --format '{{.Tag}}' | grep -v '^latest$' | head -n1 || true)"
+
+          if [[ -z "$sensor_tag" ]]; then
+            echo "No non-latest falcon-container sensor tag found after pull"
+            exit 1
+          fi
+
+          echo "sensor_tag=$sensor_tag" >> "$GITHUB_OUTPUT"
+          echo "Resolved sensor tag: $sensor_tag"
+
+      - name: Check if tag already exists in ECR
+        id: check_ecr
+        run: |
+          set -euo pipefail
+          SENSOR_TAG="${{ steps.pull_sensor.outputs.sensor_tag }}"
+
+          if aws ecr describe-images \
+            --repository-name "${{ secrets.REPOSITORY }}" \
+            --image-ids imageTag="${SENSOR_TAG}" \
+            --region "${{ env.AWS_REGION }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Tag ${SENSOR_TAG} already exists in ECR; skipping push/sign."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Tag ${SENSOR_TAG} not found in ECR; proceeding with push/sign."
+          fi
+
+      - name: Push to ECR
+        if: steps.check_ecr.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          SENSOR_TAG="${{ steps.pull_sensor.outputs.sensor_tag }}"
+          IMAGE_URI="${{ secrets.REGISTRY }}/${{ secrets.REPOSITORY }}:${SENSOR_TAG}"
+          docker tag "registry.crowdstrike.com/falcon-container/release/falcon-container:${SENSOR_TAG}" "$IMAGE_URI"
+          docker push "$IMAGE_URI"
+
+      - name: Resolve image digest from ECR
+        id: resolve_digest
+        run: |
+          set -euo pipefail
+          SENSOR_TAG="${{ steps.pull_sensor.outputs.sensor_tag }}"
+          IMAGE_URI="${{ secrets.REGISTRY }}/${{ secrets.REPOSITORY }}:${SENSOR_TAG}"
+
+          image_sha="$(aws ecr describe-images \
+            --repository-name "${{ secrets.REPOSITORY }}" \
+            --image-ids imageTag="${SENSOR_TAG}" \
+            --region "${{ env.AWS_REGION }}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)"
+
+          if [[ -z "$image_sha" || "$image_sha" == "None" ]]; then
+            echo "Unable to resolve digest for tag ${SENSOR_TAG} in ECR"
+            exit 1
+          fi
+
+          echo "image_sha=$image_sha" >> "$GITHUB_OUTPUT"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+          echo "Resolved digest: $image_sha"
+
+      - name: Sign image with key
+        if: steps.check_ecr.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          SENSOR_TAG="${{ steps.pull_sensor.outputs.sensor_tag }}"
+          export NOTATION_USERNAME=AWS
+          export NOTATION_PASSWORD="$(aws ecr get-login-password --region ${{ env.AWS_REGION }})"
+          notation sign "${{ secrets.REGISTRY }}/${{ secrets.REPOSITORY }}:${SENSOR_TAG}" --plugin "com.amazonaws.signer.notation.plugin" --id "arn:aws:signer:${{ env.AWS_REGION }}:${{ secrets.AWS_ACCOUNT_ID }}:/signing-profiles/container_image_signing"
+
+      - name: Logout of Amazon ECR
+        if: always()
+        run: docker logout ${{secrets.REGISTRY}}
+
+  plan-dev:
+    name: Terraform Plan - Dev
+    needs: pull-push-falcon-sensor
+    uses: ./.github/workflows/tfplan.yml
+    with:
+      environment: dev
+      image_digest: ${{ needs.pull-push-falcon-sensor.outputs.image_sha }}
+    secrets: inherit
+
+  apply-dev:
+    name: Terraform Apply - Dev
+    needs:
+      - pull-push-falcon-sensor
+      - plan-dev
+    uses: ./.github/workflows/tfapply.yml
+    with:
+      environment: dev-apply # Diff environment name to avoid confusion in summary, since plan and apply run separately - approvals
+      image_digest: ${{ needs.pull-push-falcon-sensor.outputs.image_sha }}
+    secrets: inherit
+
+  plan-prod:
+    name: Terraform Plan - Prod
+    needs: pull-push-falcon-sensor
+    uses: ./.github/workflows/tfplan.yml
+    with:
+      environment: prod
+      image_digest: ${{ needs.pull-push-falcon-sensor.outputs.image_sha }}
+    secrets: inherit
+
+  apply-prod:
+    name: Terraform Apply - Prod
+    needs:
+      - pull-push-falcon-sensor
+      - plan-prod
+    uses: ./.github/workflows/tfapply.yml
+    with:
+      environment: prod-apply
+      image_digest: ${{ needs.pull-push-falcon-sensor.outputs.image_sha }}
+    secrets: inherit
+  
