@@ -85,12 +85,12 @@ variable "falcon_cid" {
   sensitive   = true
 }
 
-variable "container_image_repository" {
-  description = "Container sensor image repository (for example <ecr-registry>/falcon-sensor)"
+variable "node_image_repository" {
+  description = "Node sensor image repository (for example <ecr-registry>/falcon-sensor)"
   type        = string
 }
 
-variable "container_image_digest" {
-  description = "Container sensor image digest (for example sha256:...) to deploy in chart"
+variable "node_image_digest" {
+  description = "Node sensor image digest (for example sha256:...) to deploy in chart"
   type        = string
 }

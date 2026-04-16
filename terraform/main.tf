@@ -6,11 +6,11 @@ resource "kubernetes_namespace" "target_namespace" {
   }
 }
 
-resource "helm_release" "crowdstrike_falcon_sidecar_container" {
-  name       = var.release_name
-  repository = var.chart_repository
-  chart      = var.chart_name
-  version    = var.chart_version
+resource "helm_release" "crowdstrike_falcon_sensor" {
+  name       = "crowdstrike-falcon-sensor"
+  repository = "https://crowdstrike.github.io/falcon-helm"
+  chart      = "falcon-sensor"
+  version    = "1.35.0"
   namespace  = var.namespace
 
   atomic          = var.atomic
@@ -29,19 +29,23 @@ resource "helm_release" "crowdstrike_falcon_sidecar_container" {
   }
 
   set {
-    name  = "container.image.repository"
-    value = var.container_image_repository
+    name  = "node.image.repository"
+    value = var.node_image_repository
   }
 
   set {
-    name  = "container.image.digest"
-    value = var.container_image_digest
+    name  = "node.image.digest"
+    value = var.node_image_digest
+  }
+
+  set{
+    name  = "node.enabled"
+    value = var.node_enabled
   }
 
   set_sensitive {
     name  = "falcon.cid"
     value = var.falcon_cid
   }
-
   depends_on = [kubernetes_namespace.target_namespace]
 }
